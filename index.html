@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E-Penilaian Santri Cloud</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lucide/0.263.0/lucide.min.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Global Firebase Configuration
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'esantri-v1';
+
+        window.state = {
+            user: null,
+            santri: [],
+            penilaian: [],
+            guruList: [],
+            aspekKL: [],
+            aspekMD: []
+        };
+
+        const showToast = (message, type = 'success') => {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `${type === 'success' ? 'bg-green-600' : 'bg-red-600'} text-white px-5 py-3 rounded-xl shadow-lg flex items-center gap-3 toast-animation pointer-events-auto`;
+            toast.innerHTML = `<i data-lucide="${type === 'success' ? 'check' : 'info'}"></i><span class="text-sm font-medium">${message}</span>`;
+            container.appendChild(toast);
+            if (window.lucide) window.lucide.createIcons();
+            setTimeout(() => toast.remove(), 3000);
+        };
+
+        // --- AUTHENTICATION (RULE 3) ---
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+                showToast("Gagal menyambungkan ke server", "error");
+            }
+        };
+
+        // --- LISTENERS SETUP (RULE 1 & 2) ---
+        let activeListeners = [];
+        const setupListeners = (user) => {
+            // Bersihkan listener lama jika ada
+            activeListeners.forEach(unsub => unsub());
+            activeListeners = [];
+
+            if (!user) return;
+
+            // Koleksi Dasar (Rule 1: /artifacts/{appId}/public/data/{collection})
+            const baseRef = (col) => collection(db, 'artifacts', appId, 'public', 'data', col);
+
+            // 1. Data Guru
+            const unsubGuru = onSnapshot(baseRef('guru'), (snapshot) => {
+                window.state.guruList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.renderTabelGuru();
+                window.populateDropdowns();
+            }, (err) => console.error("Error guru:", err));
+            activeListeners.push(unsubGuru);
+
+            // 2. Data Santri
+            const unsubSantri = onSnapshot(baseRef('santri'), (snapshot) => {
+                window.state.santri = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.renderTabelSantri();
+                window.populateDropdowns();
+                window.updateStats();
+            }, (err) => console.error("Error santri:", err));
+            activeListeners.push(unsubSantri);
+
+            // 3. Config Aspek
+            const unsubConfig = onSnapshot(baseRef('config'), (snapshot) => {
+                const config = {};
+                snapshot.docs.forEach(doc => config[doc.id] = doc.data().list);
+                window.state.aspekKL = config.aspekKL || [
+                    {text: "Jujur", active: true}, 
+                    {text: "Amanah", active: true}, 
+                    {text: "Rukun", active: true}
+                ];
+                window.state.aspekMD = config.aspekMD || [
+                    {text: "Merapikan Tempat Tidur", active: true}, 
+                    {text: "Mencuci Piring", active: true}
+                ];
+                window.renderListAspek();
+                window.updateStats();
+            }, (err) => console.error("Error config:", err));
+            activeListeners.push(unsubConfig);
+
+            // 4. Penilaian
+            const unsubNilai = onSnapshot(baseRef('penilaian'), (snapshot) => {
+                window.state.penilaian = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                window.updateStats();
+            }, (err) => console.error("Error nilai:", err));
+            activeListeners.push(unsubNilai);
+        };
+
+        // Auth State Observer
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                window.state.user = user;
+                document.getElementById('user-id-display').innerText = `ID Guru: ${user.uid.substring(0,8)}`;
+                setupListeners(user);
+            } else {
+                window.state.user = null;
+                document.getElementById('user-id-display').innerText = "Menghubungkan...";
+            }
+        });
+
+        // --- DATABASE ACTIONS ---
+        window.tambahGuru = async () => {
+            if (!window.state.user) return;
+            const nama = document.getElementById('guruNamaInput').value.trim();
+            const nip = document.getElementById('guruNipInput').value.trim();
+            if(!nama) return showToast("Nama guru wajib diisi", "error");
+            
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'guru'), { 
+                    nama, nip, createdAt: Date.now() 
+                });
+                document.getElementById('guruNamaInput').value = ''; 
+                document.getElementById('guruNipInput').value = '';
+                showToast("Guru berhasil didaftarkan");
+            } catch (e) { showToast("Gagal menyimpan", "error"); }
+        };
+
+        window.hapusGuru = async (id) => {
+            if (!window.state.user) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'guru', id));
+                showToast("Data guru dihapus");
+            } catch (e) { showToast("Gagal menghapus", "error"); }
+        };
+
+        window.tambahSantri = async () => {
+            if (!window.state.user) return;
+            const nama = document.getElementById('namaSantri').value.trim();
+            const kelas = document.getElementById('kelasSantri').value.trim();
+            const tpq = document.getElementById('tpqSantri').value.trim();
+            const guruId = document.getElementById('guruSantriSelect').value;
+            if(!nama || !guruId) return showToast("Nama dan Guru wajib diisi", "error");
+            
+            try {
+                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'santri'), { 
+                    nama, kelas, tpq, guruId, creatorId: window.state.user.uid 
+                });
+                document.getElementById('namaSantri').value = ''; 
+                document.getElementById('kelasSantri').value = '';
+                showToast("Santri berhasil didaftarkan");
+            } catch (e) { showToast("Gagal menyimpan", "error"); }
+        };
+
+        window.hapusSantri = async (id) => {
+            if (!window.state.user) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'santri', id));
+                showToast("Data santri dihapus");
+            } catch (e) { showToast("Gagal menghapus", "error"); }
+        };
+
+        window.updateAspek = async (type, newList) => {
+            if (!window.state.user) return;
+            try {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'config', type), { list: newList });
+            } catch (e) { showToast("Gagal memperbarui aspek", "error"); }
+        };
+
+        window.simpanNilai = async (data) => {
+            if (!window.state.user) return;
+            try {
+                const existing = window.state.penilaian.find(p => p.santriId === data.santriId && p.bulan === data.bulan && p.tahun === data.tahun);
+                if(existing) {
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'penilaian', existing.id), data);
+                } else {
+                    await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'penilaian'), data);
+                }
+                showToast("Penilaian berhasil disimpan");
+            } catch (e) { showToast("Gagal menyimpan nilai", "error"); }
+        };
+
+        // Jalankan Autentikasi
+        initAuth();
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap');
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; color: #1e293b; }
+        .sidebar-link.active { background-color: #16a34a; color: white; box-shadow: 0 4px 12px rgba(22, 163, 74, 0.2); }
+        @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .toast-animation { animation: slideIn 0.3s ease-out forwards; }
+    </style>
+</head>
+<body class="flex min-h-screen">
+
+    <div id="toast-container" class="fixed top-5 right-5 z-[100] space-y-3 pointer-events-none"></div>
+
+    <aside class="w-64 bg-white border-r hidden md:flex flex-col sticky top-0 h-screen">
+        <div class="p-6 border-b">
+            <div class="flex items-center gap-3">
+                <div class="p-2 bg-green-600 rounded-lg"><i data-lucide="graduation-cap" class="text-white w-6 h-6"></i></div>
+                <h2 class="font-bold text-lg text-green-700 tracking-tight">E-Santri Cloud</h2>
+            </div>
+        </div>
+        <nav class="flex-1 p-4 space-y-2 mt-4">
+            <button onclick="switchTab('dashboard')" id="btn-dashboard" class="sidebar-link active flex items-center gap-3 w-full p-3 rounded-xl transition-all font-medium">
+                <i data-lucide="layout-dashboard" class="w-5 h-5"></i> Dashboard
+            </button>
+            <button onclick="switchTab('guru')" id="btn-guru" class="sidebar-link flex items-center gap-3 w-full p-3 rounded-xl text-slate-600 hover:bg-slate-50 transition-all font-medium">
+                <i data-lucide="user-cog" class="w-5 h-5"></i> Data Guru
+            </button>
+            <button onclick="switchTab('santri')" id="btn-santri" class="sidebar-link flex items-center gap-3 w-full p-3 rounded-xl text-slate-600 hover:bg-slate-50 transition-all font-medium">
+                <i data-lucide="users" class="w-5 h-5"></i> Data Santri
+            </button>
+            <button onclick="switchTab('aspek')" id="btn-aspek" class="sidebar-link flex items-center gap-3 w-full p-3 rounded-xl text-slate-600 hover:bg-slate-50 transition-all font-medium">
+                <i data-lucide="list-checks" class="w-5 h-5"></i> Kelola Aspek
+            </button>
+            <button onclick="switchTab('input')" id="btn-input" class="sidebar-link flex items-center gap-3 w-full p-3 rounded-xl text-slate-600 hover:bg-slate-50 transition-all font-medium">
+                <i data-lucide="edit-3" class="w-5 h-5"></i> Input Nilai
+            </button>
+            <button onclick="switchTab('laporan')" id="btn-laporan" class="sidebar-link flex items-center gap-3 w-full p-3 rounded-xl text-slate-600 hover:bg-slate-50 transition-all font-medium">
+                <i data-lucide="file-bar-chart" class="w-5 h-5"></i> Laporan
+            </button>
+        </nav>
+        <div class="p-4 border-t text-center">
+            <p id="user-id-display" class="text-[10px] text-slate-400 font-mono italic">Menghubungkan...</p>
+        </div>
+    </aside>
+
+    <main class="flex-1 overflow-y-auto">
+        <header class="bg-white border-b p-4 flex justify-between items-center sticky top-0 z-10">
+            <h1 id="page-title" class="text-xl font-bold text-slate-800">Ringkasan</h1>
+            <div class="flex items-center gap-3">
+                <span id="current-date" class="text-sm text-slate-500 hidden sm:block"></span>
+                <div class="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-green-600 font-bold border">TPQ</div>
+            </div>
+        </header>
+
+        <div class="p-6 max-w-6xl mx-auto">
+            
+            <!-- Dashboard Section -->
+            <div id="content-dashboard" class="space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border flex items-center gap-4">
+                        <div class="p-4 bg-blue-50 text-blue-600 rounded-xl"><i data-lucide="user-plus"></i></div>
+                        <div><p class="text-slate-500 text-sm">Total Santri</p><h3 id="stat-santri" class="text-2xl font-bold">0</h3></div>
+                    </div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border flex items-center gap-4">
+                        <div class="p-4 bg-purple-50 text-purple-600 rounded-xl"><i data-lucide="users"></i></div>
+                        <div><p class="text-slate-500 text-sm">Total Guru</p><h3 id="stat-guru" class="text-2xl font-bold">0</h3></div>
+                    </div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border flex items-center gap-4">
+                        <div class="p-4 bg-orange-50 text-orange-600 rounded-xl"><i data-lucide="clipboard-list"></i></div>
+                        <div><p class="text-slate-500 text-sm">Input Nilai</p><h3 id="stat-nilai" class="text-2xl font-bold">0</h3></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Guru Section -->
+            <div id="content-guru" class="hidden space-y-6">
+                <div class="bg-white p-6 rounded-2xl border shadow-sm">
+                    <h3 class="font-bold mb-4">Tambah Guru Baru</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <input type="text" id="guruNamaInput" placeholder="Nama Lengkap" class="p-3 bg-slate-50 rounded-xl border outline-none">
+                        <input type="text" id="guruNipInput" placeholder="NIP (Opsional)" class="p-3 bg-slate-50 rounded-xl border outline-none">
+                    </div>
+                    <button onclick="tambahGuru()" class="mt-4 w-full bg-green-600 text-white p-3 rounded-xl font-bold">Daftarkan Guru</button>
+                </div>
+                <div class="bg-white rounded-2xl border shadow-sm overflow-hidden">
+                    <table class="w-full text-left">
+                        <thead class="bg-slate-50 text-slate-500 text-sm">
+                            <tr><th class="p-4">Nama</th><th class="p-4">NIP</th><th class="p-4 text-center">Aksi</th></tr>
+                        </thead>
+                        <tbody id="tabelGuru"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Santri Section -->
+            <div id="content-santri" class="hidden space-y-6">
+                <div class="bg-white p-6 rounded-2xl border shadow-sm">
+                    <h3 class="font-bold mb-4">Pendaftaran Santri</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <input type="text" id="namaSantri" placeholder="Nama Santri" class="p-3 bg-slate-50 rounded-xl border outline-none">
+                        <input type="text" id="kelasSantri" placeholder="Kelas" class="p-3 bg-slate-50 rounded-xl border outline-none">
+                        <input type="text" id="tpqSantri" placeholder="Nama TPQ" class="p-3 bg-slate-50 rounded-xl border outline-none">
+                        <select id="guruSantriSelect" class="p-3 bg-slate-50 rounded-xl border outline-none"></select>
+                    </div>
+                    <button onclick="tambahSantri()" class="mt-4 w-full bg-slate-800 text-white p-3 rounded-xl font-bold">Simpan Data Santri</button>
+                </div>
+                <div class="bg-white rounded-2xl border shadow-sm overflow-hidden">
+                    <table class="w-full text-left">
+                        <thead class="bg-slate-50 text-slate-500 text-sm">
+                            <tr><th class="p-4">Santri</th><th class="p-4">Kelas</th><th class="p-4">Pembimbing</th><th class="p-4 text-center">Aksi</th></tr>
+                        </thead>
+                        <tbody id="tabelSantri"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Aspek Section -->
+            <div id="content-aspek" class="hidden space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div>
+                        <h3 class="font-bold mb-4 text-green-700">Karakter Luhur</h3>
+                        <div class="bg-white p-4 rounded-2xl border shadow-sm mb-4">
+                            <div class="flex gap-2">
+                                <input type="text" id="inputKL" placeholder="Aspek baru..." class="flex-1 p-2 bg-slate-50 border rounded-lg">
+                                <button onclick="addAspekLocal('kl')" class="bg-green-600 text-white px-4 rounded-lg">+</button>
+                            </div>
+                        </div>
+                        <div id="listKL" class="space-y-2"></div>
+                    </div>
+                    <div>
+                        <h3 class="font-bold mb-4 text-blue-700">Kemandirian</h3>
+                        <div class="bg-white p-4 rounded-2xl border shadow-sm mb-4">
+                            <div class="flex gap-2">
+                                <input type="text" id="inputMD" placeholder="Aspek baru..." class="flex-1 p-2 bg-slate-50 border rounded-lg">
+                                <button onclick="addAspekLocal('md')" class="bg-blue-600 text-white px-4 rounded-lg">+</button>
+                            </div>
+                        </div>
+                        <div id="listMD" class="space-y-2"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Nilai Section -->
+            <div id="content-input" class="hidden space-y-6">
+                <div class="bg-white p-6 rounded-2xl border shadow-sm grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <select id="selSantri" class="p-3 bg-slate-50 rounded-xl border"></select>
+                    <select id="selBulan" class="p-3 bg-slate-50 rounded-xl border"></select>
+                    <input type="number" id="inpTahun" value="2025" class="p-3 bg-slate-50 rounded-xl border">
+                </div>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                    <div id="containerKL" class="space-y-4"></div>
+                    <div id="containerMD" class="space-y-4"></div>
+                </div>
+                <button onclick="handleSimpanNilai()" class="w-full bg-green-600 text-white p-4 rounded-2xl font-bold shadow-lg hover:bg-green-700 transition-all">Simpan Penilaian</button>
+            </div>
+
+            <!-- Laporan Section -->
+            <div id="content-laporan" class="hidden space-y-6">
+                <div class="bg-white p-6 rounded-2xl border shadow-sm grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <select id="lapSantri" class="p-3 bg-slate-50 rounded-xl border"></select>
+                    <select id="lapBulanMulai" class="p-3 bg-slate-50 rounded-xl border"></select>
+                    <select id="lapBulanSelesai" class="p-3 bg-slate-50 rounded-xl border"></select>
+                    <button onclick="lihatLaporan()" class="bg-slate-800 text-white p-3 rounded-xl font-bold">Tampilkan</button>
+                </div>
+                <div id="previewArea" class="bg-white rounded-2xl border shadow-sm p-8 min-h-[400px] overflow-x-auto">
+                    <p class="text-center py-20 text-slate-400 italic">Data laporan akan muncul di sini.</p>
+                </div>
+                <div class="flex justify-end gap-3">
+                    <button id="btnDownload" onclick="downloadLaporan()" class="hidden bg-red-600 text-white px-8 py-3 rounded-xl font-bold">Cetak Laporan (PDF)</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        const bulanList = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+        const skorList = ["Selalu", "Sering", "Kadang-kadang", "Tidak Pernah"];
+
+        function refreshIcons() { if (window.lucide) window.lucide.createIcons(); }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('current-date').innerText = new Date().toLocaleDateString('id-ID', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+            initBulanDropdowns();
+            refreshIcons();
+        });
+
+        window.switchTab = (tabId) => {
+            document.querySelectorAll('[id^="content-"]').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.sidebar-link').forEach(el => el.classList.remove('active'));
+            document.getElementById(`content-${tabId}`).classList.remove('hidden');
+            document.getElementById(`btn-${tabId}`).classList.add('active');
+            if(tabId === 'input') renderInputForm();
+            refreshIcons();
+        };
+
+        window.updateStats = () => {
+            document.getElementById('stat-santri').innerText = window.state.santri.length;
+            document.getElementById('stat-guru').innerText = window.state.guruList.length;
+            document.getElementById('stat-nilai').innerText = window.state.penilaian.length;
+        };
+
+        window.renderTabelGuru = () => {
+            document.getElementById('tabelGuru').innerHTML = window.state.guruList.map(g => `
+                <tr class="border-b"><td class="p-4 font-medium">${g.nama}</td><td class="p-4">${g.nip || '-'}</td>
+                <td class="p-4 text-center"><button onclick="hapusGuru('${g.id}')" class="text-red-500 hover:bg-red-50 p-2 rounded-lg"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>
+            `).join(''); refreshIcons();
+        };
+
+        window.renderTabelSantri = () => {
+            document.getElementById('tabelSantri').innerHTML = window.state.santri.map(s => {
+                const g = window.state.guruList.find(x => x.id === s.guruId);
+                return `<tr class="border-b"><td class="p-4 font-medium">${s.nama}</td><td class="p-4">${s.kelas}</td>
+                <td class="p-4 text-sm font-semibold text-green-700">${g ? g.nama : '---'}</td>
+                <td class="p-4 text-center"><button onclick="hapusSantri('${s.id}')" class="text-red-500 hover:bg-red-50 p-2 rounded-lg"><i data-lucide="trash-2" class="w-4 h-4"></i></button></td></tr>`;
+            }).join(''); refreshIcons();
+        };
+
+        window.renderListAspek = () => {
+            const mapHtml = (list, type) => list.map((a, i) => `
+                <div class="bg-white p-3 rounded-xl border flex items-center justify-between">
+                    <span class="${a.active ? '' : 'text-slate-300 line-through'} font-medium text-sm">${a.text}</span>
+                    <div class="flex gap-2">
+                        <button onclick="toggleAspekLocal('${type}', ${i})" class="w-8 h-4 rounded-full ${a.active ? 'bg-green-500' : 'bg-slate-300'} relative p-1">
+                             <div class="w-2 h-2 bg-white rounded-full ${a.active ? 'ml-4' : 'ml-0'} transition-all"></div>
+                        </button>
+                        <button onclick="removeAspekLocal('${type}', ${i})" class="text-red-300"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
+                    </div>
+                </div>
+            `).join('');
+            document.getElementById('listKL').innerHTML = mapHtml(window.state.aspekKL, 'aspekKL');
+            document.getElementById('listMD').innerHTML = mapHtml(window.state.aspekMD, 'aspekMD');
+            refreshIcons();
+        };
+
+        window.addAspekLocal = (t) => {
+            const key = t === 'kl' ? 'aspekKL' : 'aspekMD';
+            const i = document.getElementById(t === 'kl' ? 'inputKL' : 'inputMD');
+            if(!i.value) return;
+            const newList = [...window.state[key], { text: i.value, active: true }];
+            window.updateAspek(key, newList);
+            i.value = '';
+        };
+
+        window.toggleAspekLocal = (key, i) => {
+            const newList = [...window.state[key]];
+            newList[i].active = !newList[i].active;
+            window.updateAspek(key, newList);
+        };
+
+        window.removeAspekLocal = (key, i) => {
+            const newList = [...window.state[key]];
+            newList.splice(i, 1);
+            window.updateAspek(key, newList);
+        };
+
+        function renderInputForm() {
+            const gen = (list, prefix) => list.filter(a => a.active).map((a, i) => `
+                <div class="bg-white p-4 rounded-xl border shadow-sm">
+                    <p class="font-bold text-slate-700 mb-2 text-sm">${a.text}</p>
+                    <div class="grid grid-cols-2 gap-2">
+                        ${skorList.map(s => `
+                            <label class="p-2 border rounded-lg text-[10px] cursor-pointer has-[:checked]:bg-green-50 has-[:checked]:border-green-500 flex items-center gap-1">
+                                <input type="radio" name="${prefix}_${i}" value="${s}" class="w-3 h-3"> ${s}
+                            </label>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+            document.getElementById('containerKL').innerHTML = '<h3 class="font-bold text-green-700 mb-2">Karakter Luhur</h3>' + gen(window.state.aspekKL, 'kl');
+            document.getElementById('containerMD').innerHTML = '<h3 class="font-bold text-blue-700 mb-2">Kemandirian</h3>' + gen(window.state.aspekMD, 'md');
+        }
+
+        window.handleSimpanNilai = () => {
+            const sid = document.getElementById('selSantri').value;
+            if(!sid) return;
+            const data = { 
+                santriId: sid, 
+                bulan: document.getElementById('selBulan').value, 
+                tahun: document.getElementById('inpTahun').value, 
+                kl: {}, md: {},
+                updatedBy: window.state.user.uid
+            };
+            window.state.aspekKL.filter(a => a.active).forEach((a, i) => { const c = document.querySelector(`input[name="kl_${i}"]:checked`); data.kl[a.text] = c ? c.value : "-"; });
+            window.state.aspekMD.filter(a => a.active).forEach((a, i) => { const c = document.querySelector(`input[name="md_${i}"]:checked`); data.md[a.text] = c ? c.value : "-"; });
+            window.simpanNilai(data);
+        };
+
+        window.populateDropdowns = () => {
+            const sH = '<option value="">-- Pilih Santri --</option>' + window.state.santri.map(s => `<option value="${s.id}">${s.nama}</option>`).join('');
+            document.getElementById('selSantri').innerHTML = sH; 
+            document.getElementById('lapSantri').innerHTML = sH;
+            const gH = '<option value="">-- Pilih Guru --</option>' + window.state.guruList.map(g => `<option value="${g.id}">${g.nama}</option>`).join('');
+            document.getElementById('guruSantriSelect').innerHTML = gH;
+        };
+
+        function initBulanDropdowns() {
+            const o = bulanList.map(b => `<option value="${b}">${b}</option>`).join('');
+            document.getElementById('selBulan').innerHTML = o;
+            const io = bulanList.map((b, i) => `<option value="${i}">${b}</option>`).join('');
+            document.getElementById('lapBulanMulai').innerHTML = io; 
+            document.getElementById('lapBulanSelesai').innerHTML = io;
+            document.getElementById('lapBulanSelesai').value = 11;
+        }
+
+        function generateAnalysis(scores) {
+            const entries = Object.entries(scores);
+            if (entries.length === 0) return `Belum ada data.`;
+            const baik = entries.filter(([k, v]) => v === "Selalu").map(([k]) => k);
+            const kurang = entries.filter(([k, v]) => v === "Kadang-kadang" || v === "Tidak Pernah").map(([k]) => k);
+
+            let res = `<div class="space-y-1">`;
+            if (baik.length > 0) res += `<p><strong>✓ Sudah Baik:</strong> ${baik.join(", ")}.</p>`;
+            if (kurang.length > 0) res += `<p class="text-red-800"><strong>⚠ Perlu Bimbingan:</strong> ${kurang.join(", ")}.</p>`;
+            res += `</div>`;
+            return res;
+        }
+
+        window.lihatLaporan = () => {
+            const sid = document.getElementById('lapSantri').value;
+            const startIdx = parseInt(document.getElementById('lapBulanMulai').value);
+            const endIdx = parseInt(document.getElementById('lapBulanSelesai').value);
+            if(!sid) return;
+
+            const sData = window.state.santri.find(s => s.id === sid);
+            const gData = window.state.guruList.find(g => g.id === sData.guruId);
+            const filtered = window.state.penilaian.filter(p => {
+                const bIdx = bulanList.indexOf(p.bulan);
+                return p.santriId === sid && bIdx >= startIdx && bIdx <= endIdx;
+            }).sort((a, b) => bulanList.indexOf(a.bulan) - bulanList.indexOf(b.bulan));
+
+            if(!filtered.length) {
+                document.getElementById('previewArea').innerHTML = '<p class="text-center py-20 text-red-500">Data penilaian belum ditemukan untuk periode ini.</p>';
+                return;
+            }
+
+            const latest = filtered[filtered.length - 1];
+            const klH = [...new Set(filtered.flatMap(p => Object.keys(p.kl)))];
+            const mdH = [...new Set(filtered.flatMap(p => Object.keys(p.md)))];
+
+            document.getElementById('previewArea').innerHTML = `
+                <div id="pdfContent" class="text-slate-800 p-2 text-[10px]">
+                    <div class="text-center border-b-2 border-black pb-4 mb-4">
+                        <h2 class="text-lg font-bold">LAPORAN CAPAIAN KARAKTER SANTRI</h2>
+                        <p class="font-bold">${sData.tpq}</p>
+                    </div>
+                    <div class="grid grid-cols-2 mb-4">
+                        <p><strong>Nama:</strong> ${sData.nama}</p>
+                        <p><strong>Periode:</strong> ${bulanList[startIdx]} - ${bulanList[endIdx]}</p>
+                        <p><strong>Kelas:</strong> ${sData.kelas}</p>
+                        <p><strong>Pengajar:</strong> ${gData ? gData.nama : '-'}</p>
+                    </div>
+                    <p class="font-bold bg-slate-50 p-1 mb-1">I. Karakter Luhur</p>
+                    <table class="w-full border-collapse border mb-4 text-[8px]">
+                        <tr class="bg-slate-50">
+                            <th class="border p-1">Aspek</th>${filtered.map(f => `<th class="border p-1">${f.bulan.substring(0,3)}</th>`).join('')}
+                        </tr>
+                        ${klH.map(k => `<tr><td class="border p-1">${k}</td>${filtered.map(f => `<td class="border p-1 text-center">${f.kl[k] || '-'}</td>`).join('')}</tr>`).join('')}
+                    </table>
+                    <div class="bg-green-50 p-2 border border-green-200 mb-4">${generateAnalysis(latest.kl)}</div>
+                    
+                    <p class="font-bold bg-slate-50 p-1 mb-1">II. Kemandirian</p>
+                    <table class="w-full border-collapse border mb-4 text-[8px]">
+                        <tr class="bg-slate-50">
+                            <th class="border p-1">Aspek</th>${filtered.map(f => `<th class="border p-1">${f.bulan.substring(0,3)}</th>`).join('')}
+                        </tr>
+                        ${mdH.map(k => `<tr><td class="border p-1">${k}</td>${filtered.map(f => `<td class="border p-1 text-center">${f.md[k] || '-'}</td>`).join('')}</tr>`).join('')}
+                    </table>
+                    <div class="bg-blue-50 p-2 border border-blue-200 mb-10">${generateAnalysis(latest.md)}</div>
+
+                    <div class="grid grid-cols-2 text-center">
+                        <div><p>Pengajar/Pembimbing,</p><br><br><p class="font-bold">(${gData ? gData.nama : '..........'})</p></div>
+                        <div><p>Orang Tua/Wali,</p><br><br><p class="font-bold">(..........)</p></div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('btnDownload').classList.remove('hidden');
+        };
+
+        window.downloadLaporan = () => {
+            const { jsPDF } = window.jspdf;
+            const doc = new jsPDF('p', 'pt', 'a4');
+            doc.html(document.getElementById('pdfContent'), {
+                callback: d => d.save('Laporan_E_Santri.pdf'),
+                margin: [40, 40, 40, 40], x: 0, y: 0, width: 515, windowWidth: 800
+            });
+        };
+    </script>
+</body>
+</html>
