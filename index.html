@@ -15,10 +15,8 @@
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, addDoc, updateDoc, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        const firebaseConfig = typeof __firebase_config !== 'undefined' 
-            ? JSON.parse(__firebase_config) 
-            : {
-                apiKey: "",
+        const firebaseConfig = {
+                apiKey: "AIzaSyC-6wZLMT7aXRJJKuwx5drsvxcysLRQQMg",
                 authDomain: "penilaian-sikap.firebaseapp.com",
                 projectId: "penilaian-sikap",
                 storageBucket: "penilaian-sikap.firebasestorage.app",
@@ -577,3 +575,4 @@
     </script>
 </body>
 </html>
+
